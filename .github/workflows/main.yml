@@ -1,0 +1,66 @@
+name: RDP
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Enable RDP and Configure User
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          $password = -join ((65..90) + (97..122) + (48..57) | Get-Random -Count 12 | % {[char]$_})
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
+              New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+              Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+              Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+          } else {
+              Set-LocalUser -Name "RDP" -Password $securePass
+          }
+          echo "RDP_CREDS=$password" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Install Tailscale
+        run: |
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe"
+          Invoke-WebRequest -Uri $tsUrl -OutFile "tailscale-setup.exe"
+          Start-Process -FilePath ".\tailscale-setup.exe" -ArgumentList "/S" -Wait
+          Start-Sleep -Seconds 10
+          $env:Path += ";C:\Program Files\Tailscale"
+          echo "C:\Program Files\Tailscale" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Connect to Tailscale
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          tailscale up --authkey=$env:TAILSCALE_AUTH_KEY --hostname=gh-rdp-$env:GITHUB_RUN_ID
+          $ip = tailscale ip -4
+          echo "TAILSCALE_IP=$ip" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Tailscale IP: $ip"
+          Start-Sleep -Seconds 5
+
+      - name: Verify RDP Port
+        run: |
+          $testResult = Test-NetConnection -ComputerName 127.0.0.1 -Port 3389
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Error "TCP connection to 127.0.0.1:3389 failed"
+              exit 1
+          }
+          Write-Host "TCP connectivity successful!"
+
+      - name: Maintain Connection
+        run: |
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Username: RDP"
+          Write-Host "Password: $env:RDP_CREDS"
+          Write-Host "==================`n"
+          
+          while ($true) {
+              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C to terminate"
+              Start-Sleep -Seconds 300
+          }
